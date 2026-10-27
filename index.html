@@ -284,36 +284,78 @@ const Store={db:null,sb:null,
     render();
   },
   /* --- Supabase (version GitHub Pages) --- */
+  /* --- Supabase avec mode hors ligne : copie locale + file d'attente --- */
+  CK:"stockAnapath.cache",QK:"stockAnapath.queue",queue:[],flushing:false,
+  lsg(k){try{return JSON.parse(localStorage.getItem(k)||"null")}catch{return null}},
+  lss(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch{return false}},
+  saveCache(){clearTimeout(this.ct);this.ct=setTimeout(()=>{const docs=[];
+    for(const [c,m] of [["articles",S.articles],["categories",S.cats],["mouvements",S.mvts],["bons",S.bons],["config",S.config]])
+      for(const [id,v] of m){const d={...v};delete d.id;docs.push([c,id,d])}
+    if(!this.lss(this.CK,{user:S.user,at:new Date().toISOString(),docs}))toast("Mémoire de l'appareil pleine : la copie hors ligne n'a pas pu être mise à jour")},300)},
+  fromDocs(docs){const g=c=>new Map(docs.filter(r=>r[0]===c).map(r=>[r[1],{...r[2],id:r[1]}]));
+    S.articles=g("articles");S.cats=g("categories");S.mvts=g("mouvements");S.bons=g("bons");S.config=g("config")},
+  applyLocal(o){const m=mapOf(o.col);if(o.op==="del")m.delete(o.id);else m.set(o.id,{...o.data,id:o.id})},
+  saveQueue(){this.lss(this.QK,this.queue);render()},
   async initSupa(){
     if(!window.SUPA_URL||!window.SUPA_KEY||!window.supabase){S.mode="setup";S.ready.a=S.ready.m=true;render();return}
     this.sb=window.supabase.createClient(window.SUPA_URL,window.SUPA_KEY);
+    this.queue=this.lsg(this.QK)||[];
     this.sb.auth.onAuthStateChange(ev=>{if(ev==="SIGNED_OUT"){S.mode="login";S.user="";render()}});
+    window.addEventListener("online",()=>{S.online=true;this.resync()});
+    window.addEventListener("offline",()=>{S.online=false;render()});
+    setInterval(()=>{if(this.queue.length||!S.online)this.resync()},30000);
     let session=null;try{session=(await this.sb.auth.getSession()).data.session}catch{}
+    const cache=this.lsg(this.CK);
+    if(cache&&cache.docs&&(session?((session.user.email||"")===cache.user):true)){
+      // ouverture immédiate depuis la copie locale, puis mise à jour depuis internet
+      S.user=cache.user;S.mode="supa";this.fromDocs(cache.docs);for(const o of this.queue)this.applyLocal(o);
+      S.ready.a=S.ready.m=true;S.online=false;render();
+      if(session)this.loadSupa(session.user);else this.resync();
+      return}
     if(!session){S.mode="login";S.ready.a=S.ready.m=true;render();return}
     await this.loadSupa(session.user);
   },
-  async login(email,pw){const {data,error}=await this.sb.auth.signInWithPassword({email,password:pw});if(error)throw error;await this.loadSupa(data.user)},
-  async logout(){try{await this.sb.auth.signOut()}catch{};S.mode="login";S.user="";render()},
-  async loadSupa(user){
-    S.user=user.email||"";S.mode="supa";S.ready.a=S.ready.m=false;render();
+  async resync(){if(this.syncing)return;this.syncing=true;
+    try{const {data}=await this.sb.auth.getSession();if(data&&data.session)await this.loadSupa(data.session.user,true)}catch{}finally{this.syncing=false}},
+  async login(email,pw){const {data,error}=await this.sb.auth.signInWithPassword({email,password:pw});if(error)throw error;
+    const c=this.lsg(this.CK);if(c&&c.user!==data.user.email){try{localStorage.removeItem(this.CK)}catch{};this.queue=[];this.saveQueue()}
+    await this.loadSupa(data.user)},
+  async logout(force){
+    if(this.queue.length&&!force){openModal(`<div class="mh"><h3>Modifications pas encore envoyées</h3><button class="btn ghost" type="button" data-close aria-label="Fermer">✕</button></div>
+      <div class="mb"><p style="margin:0"><b>${this.queue.length}</b> modification(s) faite(s) hors ligne n'ont pas encore été envoyées. Reconnectez l'appareil à internet et attendez « En ligne » avant de vous déconnecter, sinon elles seront perdues.</p></div>
+      <div class="mf"><button class="btn danger" type="button" id="lgForce">Se déconnecter quand même</button><button class="btn in" type="button" data-close>Rester connecté</button></div>`);
+      $("#lgForce").addEventListener("click",()=>{closeModal();this.logout(true)});return}
+    try{await this.sb.auth.signOut()}catch{};try{localStorage.removeItem(this.CK);localStorage.removeItem(this.QK)}catch{};this.queue=[];S.mode="login";S.user="";render()},
+  async loadSupa(user,quiet){
+    const first=!S.ready.a||S.mode!=="supa";S.user=user.email||"";S.mode="supa";
+    if(first&&!this.lsg(this.CK)){S.ready.a=S.ready.m=false;render()}
+    await this.flush();
     try{const all=[];for(let from=0;;from+=1000){const {data,error}=await this.sb.from("docs").select("col,id,data").range(from,from+999);if(error)throw error;all.push(...data);if(data.length<1000)break}
-      const g=c=>new Map(all.filter(r=>r.col===c).map(r=>[r.id,{...r.data,id:r.id}]));
-      S.articles=g("articles");S.cats=g("categories");S.mvts=g("mouvements");S.bons=g("bons");S.config=g("config");
-    }catch(e){S.ready.a=S.ready.m=true;S.mode="neterr";render();return}
-    S.ready.a=S.ready.m=true;render();
+      this.fromDocs(all.map(r=>[r.col,r.id,r.data]));for(const o of this.queue)this.applyLocal(o);S.online=true;
+    }catch(e){S.online=false;S.ready.a=S.ready.m=true;if(!this.lsg(this.CK)&&!S.articles.size){S.mode="neterr"}render();return}
+    S.ready.a=S.ready.m=true;this.saveCache();render();
     if(!this.chan)this.chan=this.sb.channel("docs-live").on("postgres_changes",{event:"*",schema:"public",table:"docs"},p=>{
       const r=p.eventType==="DELETE"?p.old:p.new;if(!r||!r.col)return;const m=mapOf(r.col);
-      if(p.eventType==="DELETE")m.delete(r.id);else m.set(r.id,{...r.data,id:r.id});render()}).subscribe();
+      if(p.eventType==="DELETE")m.delete(r.id);else m.set(r.id,{...r.data,id:r.id});for(const o of this.queue)if(o.col===r.col&&o.id===r.id)this.applyLocal(o);this.saveCache();render()}).subscribe();
   },
+  async flush(){if(this.flushing||!this.queue.length)return;this.flushing=true;let sent=0;
+    try{while(this.queue.length){const o=this.queue[0];let res;
+        try{res=o.op==="del"?await this.sb.from("docs").delete().eq("col",o.col).eq("id",o.id):await this.sb.from("docs").upsert({col:o.col,id:o.id,data:o.data})}
+        catch(e){S.online=false;break}
+        if(res.error){const m=res.error.message||"";if(/fetch|network|Failed|timeout/i.test(m)||!res.error.code){S.online=false;break}
+          // refus définitif (droits) : on retire l'opération pour ne pas bloquer la file
+          toast("Une modification a été refusée par le serveur : "+m);}
+        this.queue.shift();this.lss(this.QK,this.queue);sent++;S.online=true}
+    }finally{this.flushing=false;render();if(sent&&!this.queue.length)toast(sent+" modification(s) hors ligne envoyée(s)")}},
   async put(col,id,data){
     const map=mapOf(col);const body={...data};delete body.id;
-    if(this.sb){const {error}=await this.sb.from("docs").upsert({col,id,data:body});if(error)throw error;map.set(id,{...body,id});render();return}
+    if(this.sb){const o={op:"put",col,id,data:body};this.applyLocal(o);this.queue.push(o);this.lss(this.QK,this.queue);this.saveCache();render();this.flush();return}
     if(this.db){await this.db.collection(col).doc(id).set(body)}
     else{map.set(id,{...body,id});lsSave();render()}
   },
   async del(col,id){
     const map=mapOf(col);
-    if(this.sb){const {error}=await this.sb.from("docs").delete().eq("col",col).eq("id",id);if(error)throw error;map.delete(id);render();return}
+    if(this.sb){const o={op:"del",col,id};this.applyLocal(o);this.queue.push(o);this.lss(this.QK,this.queue);this.saveCache();render();this.flush();return}
     if(this.db){await this.db.collection(col).doc(id).delete()}
     else{map.delete(id);lsSave();render()}
   }
@@ -354,8 +396,8 @@ const sortedArticles=()=>[...S.articles.values()].sort((a,b)=>CAT_KEYS.indexOf(a
 function render(){
   syncCats();const bs=document.querySelector(".brand small");if(bs)bs.textContent=CAT_KEYS.map(k=>CATS[k].short).join(" · ");
   const m=$("#mode");m.className="mode "+S.mode;
-  m.querySelector("span").textContent=S.mode==="cloud"?"Données en ligne":S.mode==="supa"?"En ligne · "+S.user:S.mode==="local"?"Enregistré sur ce PC":S.mode==="login"?"Non connecté":"Chargement…";
-  m.className="mode "+(S.mode==="supa"?"cloud":S.mode);
+  m.querySelector("span").textContent=S.mode==="cloud"?"Données en ligne":S.mode==="supa"?(S.online?"En ligne · "+S.user:"Hors ligne · "+S.user)+(Store.queue.length?" · "+Store.queue.length+" en attente":""):S.mode==="local"?"Enregistré sur ce PC":S.mode==="login"?"Non connecté":"Chargement…";
+  m.className="mode "+(S.mode==="supa"?(S.online&&!Store.queue.length?"cloud":"local"):S.mode);
   const gate=["login","setup","neterr"].includes(S.mode);["bIn","bOut","bMenu"].forEach(i=>{const e=document.getElementById(i);if(e)e.hidden=gate});const nv=$("#tabs");if(nv)nv.hidden=gate;
   const lo=$("#bLogout");if(lo)lo.hidden=S.mode!=="supa";const bp=$("#bPw");if(bp)bp.hidden=S.mode!=="supa";
   if(gate){if(S.mode==="login"&&$("#lf"))return;$("#view").innerHTML=vGate();const f=$("#lEmail");if(f&&!document.activeElement.closest?.("#lf"))f.focus();return}
@@ -697,7 +739,7 @@ function pwForm(){
     if(a.length<8){err.textContent="Le mot de passe doit contenir au moins 8 caractères.";$("#p1").focus();return}
     if(a!==b){err.textContent="Les deux mots de passe ne sont pas identiques.";$("#p2").focus();return}
     const btn=document.querySelector('button[form="pf"]');btn.disabled=true;btn.textContent="Enregistrement…";
-    try{const {error}=await Store.sb.auth.updateUser({password:a});if(error)throw error;closeModal();toast("Mot de passe modifié")}
+    try{if(!navigator.onLine)throw {message:"offline"};const {error}=await Store.sb.auth.updateUser({password:a});if(error)throw error;closeModal();toast("Mot de passe modifié")}
     catch(x){const m=(x&&x.message)||"";err.textContent=/different|same/i.test(m)?"Choisissez un mot de passe différent de l'actuel.":/weak|short|length/i.test(m)?"Mot de passe trop faible : ajoutez des chiffres ou des lettres.":"Modification impossible. Vérifiez internet, puis reconnectez-vous et réessayez.";btn.disabled=false;btn.textContent="Enregistrer"}});
 }
 

@@ -209,6 +209,7 @@ input,select,textarea{box-shadow:0 1px 2px rgb(0 0 0 / .06) inset}
           <button type="button" data-act="xstock">Exporter l'état du stock (Excel)</button>
           <button type="button" data-act="backup">Sauvegarde complète (.json)</button>
           <button type="button" data-act="restore">Restaurer une sauvegarde</button>
+          <button type="button" data-act="pw" id="bPw" hidden>Changer mon mot de passe</button>
           <button type="button" data-act="logout" id="bLogout" hidden>Se déconnecter</button>
         </div>
       </div>
@@ -356,7 +357,7 @@ function render(){
   m.querySelector("span").textContent=S.mode==="cloud"?"Données en ligne":S.mode==="supa"?"En ligne · "+S.user:S.mode==="local"?"Enregistré sur ce PC":S.mode==="login"?"Non connecté":"Chargement…";
   m.className="mode "+(S.mode==="supa"?"cloud":S.mode);
   const gate=["login","setup","neterr"].includes(S.mode);["bIn","bOut","bMenu"].forEach(i=>{const e=document.getElementById(i);if(e)e.hidden=gate});const nv=$("#tabs");if(nv)nv.hidden=gate;
-  const lo=$("#bLogout");if(lo)lo.hidden=S.mode!=="supa";
+  const lo=$("#bLogout");if(lo)lo.hidden=S.mode!=="supa";const bp=$("#bPw");if(bp)bp.hidden=S.mode!=="supa";
   if(gate){if(S.mode==="login"&&$("#lf"))return;$("#view").innerHTML=vGate();const f=$("#lEmail");if(f&&!document.activeElement.closest?.("#lf"))f.focus();return}
   document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-selected",b.dataset.tab===S.tab));
   const v=$("#view");const keep=document.activeElement&&document.activeElement.id;const pos=keep&&document.activeElement.selectionStart;
@@ -681,6 +682,25 @@ function exportBesoins(){const st=compute();const B=S.bes;const {rows}=besoinsRo
     ["N°","Type","Désignation","Conditionnement","Consommation période","Moyenne mensuelle","Stock actuel","Quantité proposée","Quantité retenue","Observation"],
     ...rows.map((r,i)=>[i+1,CATS[r.a.cat]?.short||"",r.a.nom,r.a.unite,r.c,Math.round(r.moy*100)/100,r.s,r.prop,"",""])],[5,11,42,22,12,12,11,12,12,22]]],"Expression_besoins_"+today()+".xlsx")}
 
+/* ---------- mot de passe ---------- */
+function pwForm(){
+  openModal(`<div class="mh"><h3>Changer mon mot de passe</h3><button class="btn ghost" type="button" data-close aria-label="Fermer">✕</button></div>
+  <form id="pf" class="mb" novalidate>
+    <p class="hint" style="margin:0">Compte : <b>${esc(S.user)}</b></p>
+    <label class="f">Nouveau mot de passe<input id="p1" type="password" autocomplete="new-password" autofocus></label>
+    <label class="f">Confirmer le nouveau mot de passe<input id="p2" type="password" autocomplete="new-password"></label>
+    <span class="hint">8 caractères minimum. Le nouveau mot de passe servira sur tous vos appareils.</span>
+    <div class="err" id="pErr" role="alert"></div>
+  </form>
+  <div class="mf"><button class="btn" type="button" data-close>Annuler</button><button class="btn in" type="submit" form="pf">Enregistrer</button></div>`);
+  $("#pf").addEventListener("submit",async e=>{e.preventDefault();const a=$("#p1").value,b=$("#p2").value,err=$("#pErr");err.textContent="";
+    if(a.length<8){err.textContent="Le mot de passe doit contenir au moins 8 caractères.";$("#p1").focus();return}
+    if(a!==b){err.textContent="Les deux mots de passe ne sont pas identiques.";$("#p2").focus();return}
+    const btn=document.querySelector('button[form="pf"]');btn.disabled=true;btn.textContent="Enregistrement…";
+    try{const {error}=await Store.sb.auth.updateUser({password:a});if(error)throw error;closeModal();toast("Mot de passe modifié")}
+    catch(x){const m=(x&&x.message)||"";err.textContent=/different|same/i.test(m)?"Choisissez un mot de passe différent de l'actuel.":/weak|short|length/i.test(m)?"Mot de passe trop faible : ajoutez des chiffres ou des lettres.":"Modification impossible. Vérifiez internet, puis reconnectez-vous et réessayez.";btn.disabled=false;btn.textContent="Enregistrer"}});
+}
+
 /* ---------- types de stock ---------- */
 function catsForm(){
   const n={};for(const a of S.articles.values())n[a.cat]=(n[a.cat]||0)+1;
@@ -874,6 +894,7 @@ document.addEventListener("click",e=>{
   if(act==="newart")artForm();
   else if(act==="cats")catsForm();
   else if(act==="logout")Store.logout();
+  else if(act==="pw")pwForm();
   else if(act==="entete")enteteForm();
   else if(act==="xbesoins")exportBesoins();
   else if(act==="import")$("#fileXlsx").click();

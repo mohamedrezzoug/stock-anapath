@@ -1,0 +1,45 @@
+name: Sauvegarde quotidienne Supabase
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exporter la table docs
+        env:
+          SUPA_URL: ${{ secrets.SUPABASE_URL }}
+          SUPA_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          : > out/pages.jsonl
+          from=0; step=1000
+          while true; do
+            to=$((from+step-1))
+            curl -sS --fail "$SUPA_URL/rest/v1/docs?select=*&order=col,id" \
+              -H "apikey: $SUPA_KEY" -H "Authorization: Bearer $SUPA_KEY" \
+              -H "Range: $from-$to" -o page.json
+            n=$(jq length page.json)
+            cat page.json >> out/pages.jsonl; echo >> out/pages.jsonl
+            [ "$n" -lt "$step" ] && break
+            from=$((from+step))
+          done
+          jq -s 'add' out/pages.jsonl > "out/stock-anapath-$(date -u +%F).json"
+          rm out/pages.jsonl
+          total=$(jq length out/stock-anapath-*.json)
+          echo "Lignes sauvegardées : $total"
+          [ "$total" -gt 0 ] || { echo "Sauvegarde vide, échec"; exit 1; }
+
+      - name: Conserver la sauvegarde (30 jours)
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-anapath-backup
+          path: out/*.json
+          retention-days: 30
